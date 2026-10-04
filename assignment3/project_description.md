@@ -76,8 +76,7 @@ dispatcher.done(k, reason, iterations)
   `DispatcherShutdown`, every task still open is finished as if `done(k)` had been called at that moment (its last
   evaluation counts; a submitted but unevaluated patch is graded; no patch is a failure), and
   tasks never opened count as failures. Gradings already running still finish.
-- **The verdicts are the facility's.** They are kept outside anything your agent can write, so the
-  only way to a better score is a better patch.
+
 
 ### Your entry point
 
