@@ -216,16 +216,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global ROOT
+    global ROOT, WORK_ROOT
     ap = argparse.ArgumentParser(description="CS2680 A3 sandbox exec server")
     ap.add_argument("--root", required=True, help="repository checkout (e.g. /app)")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--work", default=WORK_ROOT, help="extra writable area besides the repository (default /work)")
     args = ap.parse_args()
     ROOT = os.path.realpath(args.root)
+    WORK_ROOT = args.work
     if not os.path.isdir(ROOT):
         _log(f"root does not exist: {ROOT}")
         return 2
-    os.makedirs(WORK_ROOT, exist_ok=True)
+    try:
+        os.makedirs(WORK_ROOT, exist_ok=True)
+    except OSError as e:                      # e.g. a local dry run without permission for /work
+        _log(f"warning: cannot create {WORK_ROOT}: {e}")
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     srv.daemon_threads = True
     _log(f"serving root={ROOT} on port {args.port}")

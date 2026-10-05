@@ -1,95 +1,91 @@
-"""Your agent. Everything in src/ is yours: replace this starter with your own design.
+"""The agent: `Agent(dispatcher).run()` is the entry point madsOpt.py calls.
 
-madsOpt.py (course code) builds the dispatcher client and calls
-
-    Agent(dispatcher).run()
-
-That is all it needs from src/. This starter only shows how to use
-what the course provides. It makes no attempt to fix anything, so every task fails until you
-write your agent:
-
-- the dispatcher (dispatcher/dispatcher.py) opens tasks and grades patches: Agent.run() and
-  Agent.solve() below show every call;
-- a Sandbox (src/sandbox.py) is the only way to read, write or run anything in a task's
-  repository, which lives in its own task container;
-- the course API (environment variables: CS2680_BASE_URL, CS2680_API_KEY and the model ids
-  CS2680_MODEL_EXPERT / CS2680_MODEL_STANDARD / CS2680_MODEL_STARTER) is used by call_model() below;
-- the trace (dispatcher.logger(k)) must get every model call and every tool call: the
-  leaderboard computes your cost and turn counts from it.
+Design
+- Up to PARALLEL (<= 5, the facility's live-task cap) worker threads. Each worker repeatedly
+  opens the next task, solves it with a TaskSolver (src/solver.py) and finalizes it with done().
+  next_task() is serialized by a lock, so the live-task cap is never exceeded.
+- One shared run deadline, RUN_LIMIT_S after the first task was opened, bounds every solver so
+  that each task hands in what it has before the facility stops the run.
+- Model calls go through src/llm.py (retries, trace logging), repository access through
+  src/tools.py over src/sandbox.py; src/prompts.py holds the prompts; src/config.py the knobs.
 """
 
-import os
 import sys
+import threading
+import time
+import traceback
 
-from .sandbox import Sandbox
+from . import config
+from .solver import DispatcherError, DispatcherShutdown, TaskSolver
 
 
 def _debug(msg: str):
     print(f"[madsOpt] {msg}", file=sys.stderr, flush=True)
 
 
-def call_model(client, model_id: str, messages: list, logger, iteration: int, **kwargs):
-    """One chat-completions request to the course API, logged in the task's trace.
-
-    `messages` is an OpenAI-style message list; extra keyword arguments (e.g. tools=[...]) are
-    passed to the API unchanged. Nothing else is done for you here.
-    """
-    response = client.chat.completions.create(model=model_id, messages=messages, **kwargs)
-    usage = response.usage
-    logger.api_request(iteration,
-                       getattr(usage, "prompt_tokens", None),
-                       getattr(usage, "completion_tokens", None),
-                       getattr(usage, "total_tokens", None),
-                       model_id)                  # the model this request used (one run may use several)
-    return response
-
-
 class Agent:
     def __init__(self, dispatcher):
-        from openai import OpenAI                       # installed in the agent container
-
         self.dispatcher = dispatcher
-        self.model_id = os.environ["CS2680_MODEL_STANDARD"]   # this starter's model; any CS2680_MODEL_* may be used
-        self.client = OpenAI(base_url=os.environ["CS2680_BASE_URL"], api_key=os.environ["CS2680_API_KEY"])
+        self.model_id = config.get_model_id()        # fails early if the model env is missing
+        self.n_workers = max(1, min(config.PARALLEL, 5))
+        self._open_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._run_start = None
+
+    def run_deadline(self) -> float:
+        return (self._run_start or time.time()) + config.RUN_LIMIT_S
 
     def run(self):
-        """Work through the tasks. This starter takes them one at a time, in the order given."""
-        from dispatcher import DispatcherShutdown
-        while True:
+        _debug(f"agent starting: model={self.model_id} parallel={self.n_workers} "
+               f"turns/task={config.MAX_ITERATIONS} budget/task={config.TASK_BUDGET_S}s attempts={config.MAX_ATTEMPTS}")
+        threads = [threading.Thread(target=self._worker, name=f"worker-{i}", daemon=True)
+                   for i in range(self.n_workers)]
+        for t in threads:
+            t.start()
+            time.sleep(1)                      # stagger the first sandbox starts
+        for t in threads:
+            t.join()
+        _debug("agent finished")
+
+    def _open_task(self):
+        with self._open_lock:
+            if self._stop.is_set():
+                return None
+            if self._run_start is not None and self.run_deadline() - time.time() < config.RUN_MARGIN_S + 180:
+                _debug("the run limit is near; not opening more tasks")
+                return None
+            task = self.dispatcher.next_task()
+            if task is not None and self._run_start is None:
+                self._run_start = time.time()
+            return task
+
+    def _worker(self):
+        name = threading.current_thread().name
+        refusals = 0
+        while not self._stop.is_set():
             try:
-                # Opens the next task (its task container is started for you) and returns its
-                # dict, or None when no tasks are left. Raises DispatcherError
-                # (from dispatcher import DispatcherError) when 5 tasks are already open.
-                task = self.dispatcher.next_task()
-            except DispatcherShutdown:                   # the dispatcher ended the run (e.g. time limit)
+                task = self._open_task()
+            except DispatcherShutdown:
+                self._stop.set()
                 return
+            except DispatcherError as e:
+                if "too many live" in str(e):   # the facility's cap is below our pool size: this
+                    _debug(f"{name}: live-task cap reached; worker exits (active workers continue)")
+                    return                      # worker is not needed, the active ones pick up the rest
+                refusals += 1
+                if refusals > 3:
+                    _debug(f"{name}: next_task keeps failing ({e}); worker exits")
+                    return
+                _debug(f"{name}: next_task refused ({e}); retrying in 20s")
+                time.sleep(20)
+                continue
             if task is None:
                 return
             try:
-                self.solve(task)
+                TaskSolver(self.dispatcher, task, self.run_deadline).run()
             except DispatcherShutdown:
+                self._stop.set()
                 return
-
-    def solve(self, task: dict):
-        k = task["task"]                                  # the task index
-        logger = self.dispatcher.logger(k)                # this task's trace: madsOpt_logs/<k>/run.jsonl
-        sb = Sandbox(task["sandbox_url"], task["workdir"])  # this task's repository
-        # What to fix: task["problem_statement"], task["requirements"], task["interface"].
-        iterations = 0
-
-        # ---- your agent's work on the task goes here -----------------------------------------
-        # Ask the model:  response = call_model(self.client, self.model_id, messages, logger, iterations)
-        # Repository:     r = sb.exec("git status --short", timeout_s=60)  # {"output", "exit_code", "timed_out"}
-        #                 text = sb.read_text("path/to/file.py");  sb.write_text("path/to/file.py", text)
-        # Log tool use:   logger.tool_call(iterations, name, args)
-        #                 logger.tool_result(iterations, name, result, is_error)
-        # ---------------------------------------------------------------------------------------
-
-        size = self.dispatcher.extract_patch(k)           # `git diff` of the sandbox -> the task's patch folder
-        # (or self.dispatcher.submit_patch(k, text) to write a patch yourself)
-        if size:                                          # evaluate() refuses an empty patch
-            evaluation = self.dispatcher.evaluate(k)      # {"tests_failed", "tests_total", "attempt"}; waits for the grading
-            _debug(f"task {k}: {evaluation['tests_failed']}/{evaluation['tests_total']} tests failing")
-            # To keep working after reading the evaluation: self.dispatcher.continue_task(k)
-            # (your edits stay in the sandbox), then extract_patch(k) and evaluate(k) again.
-        self.dispatcher.done(k, "done", iterations)       # final: the last evaluation is the task's result
+            except Exception as e:             # noqa: BLE001 — one task must not kill the worker
+                _debug(f"{name}: task {task.get('task')} failed outside the solver: "
+                       f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
