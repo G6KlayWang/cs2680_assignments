@@ -8,8 +8,8 @@
 The main agent runs in the **agent container**, built from the course's `dispatcher/agent.Dockerfile`, with your `src/`
 mounted in. This is the main agent loop started at the very beginning, and memorys, subagents or 
 other features should also live inside this agent container. 
-The `starter_code` folder is mounted **read-only** at `/madsOpt`: the only places there your agent
-can write are `.tasks/` (its working directory) and `madsOpt_logs/`. Anything else it needs to
+The `starter_code` folder is mounted read-only at `/madsOpt`: the only places there your agent
+can write are `.tasks/` (its working directory) and `madsOpt_logs/` (where logs go). Anything else it needs to
 write (scratch files, caches) goes elsewhere inside the container, e.g. `/tmp`.
 
 Every task runs in **its own task container**, built from that task's own image: the repository
@@ -65,7 +65,7 @@ dispatcher.done(k, reason, iterations)
                               # failure. The task container and the patch folder are removed.
 ```
 
-### The rules the facility enforces
+### The rules the dispatcher enforces
 
 - **At most 5 tasks live at once.** `next_task()` raises `DispatcherError` when 5 are open. `next_task()` returns `None` when no tasks are left.
 - **One attempt at a time per task.** `continue_task(k)`, `evaluate(k)` and `done(k)` are refused
@@ -78,7 +78,7 @@ dispatcher.done(k, reason, iterations)
   tasks never opened count as failures. Gradings already running still finish.
 
 
-### Your entry point
+### Entry point
 
 ```python
 class Agent:
@@ -92,9 +92,8 @@ another attempt on a failing task or move on, what to carry from one task to the
 starter `Agent` in `src/agentic_loop.py` only shows these calls: it takes the tasks one at a
 time and makes no attempt to fix them, so every task fails until you write your own.
 
-Log your model calls and tool calls through `dispatcher.logger(k)`; the leaderboard reads your
-turn counts from that trace. Your cost does not come from the trace: it is what the course API
-account was charged during the run.
+Log your model calls and tool calls through `dispatcher.logger(k)`, and the leaderboard reads your
+turn counts from that trace. 
 
 
 ## Part 1. Starter code
@@ -177,7 +176,7 @@ python3 evaluation_scripts/run_all.py
 Progress is in `run_logs/sequence.log`. At the end you have, inside `starter_code`:
 `run_all_results.md` (e.g. `3/5 passed`), `pro_eval/` (the grader's output per task),
 `model_patch_<k>.diff`, and `madsOpt_logs/<k>/run.jsonl` (your agent's traces). The starter
-`Agent` fixes nothing, so with it expect `0/5 passed`.
+agent is just a skeleton and it fixes nothing, so with it expect `0/5 passed`.
 Archive previous runs in another folder before the next run.
 
 
@@ -187,8 +186,7 @@ The leaderboard grades your `src/` with the same `dispatcher/`, `madsOpt.py` and
 `evaluation_scripts/` as the starter code, on the evaluation task set. Only your `src/` is taken
 from what you upload. Find the leaderboard at: https://leaderboard.cs2680.com/
 
-**Step 1. Register.** Create an account with your Harvard email address (one ending in
-`harvard.edu`) and your full name exactly as it appears on Canvas.
+**Step 1. Register.** Create an account with your Harvard email address and your full name exactly as the ones on Canvas.
 
 **Step 2. The leaderboard.** After you log in, the `Leaderboard` page shows the top 10 students, each
 by their best submission, and, below them, your own best submission with its rank. The leaderboard
@@ -217,17 +215,15 @@ grading.
 **Step 6. Ranking: a skyline.** Each student is ranked by their best submission.
 
 - Best submissions that solved **at least 6 tasks** are ranked in skyline layers over the three
-  metrics. One submission dominates another if it is at least as good on all three (as many or
-  more tasks solved, the same or lower cost per solved task, the same or lower time per solved
-  task) and better on at least one of them. Rank 1 is every submission that no other dominates;
+  metrics. One submission dominates another if it is at least as good on all three and better on at least one of them. Rank 1 is every submission that no other dominates;
   rank 2 is the same among the rest, and so on.
 - Best submissions that solved fewer than 6 tasks come below all of them, ranked by tasks solved
   alone.
 - Equal ranks are ties, and the next rank counts everyone ahead: 1, 1, 1, 4, ...
-- A new submission becomes your best only if it ranks strictly better than your current best; a
+- A new submission becomes your best only if it ranks strictly better than your current best. A
   tie keeps the current one.
 
-### More information about submission
+### More information about leaderboard submission
 
 - **The leaderboard has 26 tasks**, numbered 1–26 (the first *k* of them if you set a number of
   tasks on the Submit page).
